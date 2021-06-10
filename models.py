@@ -3,6 +3,8 @@ from torch import nn
 from typing import Optional, List
 from collections import defaultdict
 
+torch.autograd.set_detect_anomaly(True)
+
 
 def assert_shape(x, shape: list):
     """ ex: assert_shape(conv_input_array, [8, 3, None, None]) """
@@ -104,6 +106,7 @@ class GRULayer(nn.Module):
 
 
 class RNN(nn.Module):
+
     def __init__(self, input_size: int, hidden_size: int = 128, num_layers: int = 1, nonlinearity: str = 'tanh',
                  bias: bool = True, bidirectional: bool = False):
         super(RNN, self).__init__()
@@ -113,52 +116,63 @@ class RNN(nn.Module):
         self.bias = bias
         self.bidirectional = bidirectional
         self.nonlinearity = nonlinearity
-        self.layers: List[List[RNNLayer]] = [self.__generate_layer()]
+        self.layers = nn.ModuleList([nn.ModuleList(self.__init_layer(0))])
         for i in range(1, self.num_layers):
-            self.layers.append(self.__generate_layer())
+            self.layers.append(self.__init_layer(i))
         self.num_directions = 2 if self.bidirectional else 1
 
-    def __generate_layer(self):
+    def __init_layer(self, layer_index):
         if not self.bidirectional:
-            return [self.__forward_layer()]
+            return nn.ModuleList([self.__layer(layer_index)])
         else:
-            return [self.__forward_layer(), self.__backward_layer()]
+            return nn.ModuleList([self.__layer(layer_index), self.__layer(layer_index)])
 
-    def __forward_layer(self):
-        return RNNLayer(input_size=self.input_size,
-                        hidden_size=self.hidden_size,
-                        nonlinearity=self.nonlinearity,
-                        bias=self.bias)
+    def __layer(self, layer_index):
+        if layer_index == 0:
+            return RNNLayer(input_size=self.input_size,
+                            hidden_size=self.hidden_size,
+                            nonlinearity=self.nonlinearity,
+                            bias=self.bias)
+        else:
+            return RNNLayer(input_size=self.hidden_size,
+                            hidden_size=self.hidden_size,
+                            nonlinearity=self.nonlinearity,
+                            bias=self.bias)
 
-    def __backward_layer(self):
-        return RNNLayer(input_size=self.input_size,
-                        hidden_size=self.hidden_size,
-                        nonlinearity=self.nonlinearity,
-                        bias=self.bias)
+    def __init_hidden(self):
+        return torch.zeros((self.num_directions * self.num_layers, self.hidden_size))
 
-    def __forward_unidirectional(self, input: torch.Tensor, h_0: Optional[torch.Tensor] = None, layer_direction: int = 0):
+    def __one_time_step(self, h_i, h_0, ldir):
+        i = 0
+        h_l = []
+        for layer in self.layers:
+            h_i = layer[ldir](h_i, h_0[i:i + 1, ])
+            h_l.append(h_i)
+            i += 1
+        return torch.cat(h_l, dim=0), h_l[-1]
+
+    def __forward_unidirectional(self, input: torch.Tensor, h_0: torch.Tensor, ldir: int = 0):
         sequence_length = input.shape[0]
+        h_n = []
+        for step in range(sequence_length):
+            h_i = input[step:step + 1, ]
+            h_0, h_t = self.__one_time_step(h_i, h_0, ldir)
+            h_n.append(h_t)
 
-        if not h_0:
-            h_0 = nn.parameter.Parameter(torch.zeros((self.num_layers, self.hidden_size)))
+        return torch.cat(h_n, dim=0), h_0
 
-        for step in torch.arange(0, sequence_length, dtype=torch.int32):
-            for layer in self.layers:
-                h_0 = layer[layer_direction](torch.index_select(input, 0, step), h_0)
-            output.append(h_0)
-
-        return torch.cat(output[1:], dim=0), output[-1]
-
-    def __forward_bidirectional(self, input: torch.Tensor, h_0: Optional[torch.Tensor] = None):
+    def __forward_bidirectional(self, input: torch.Tensor, h_0: torch.Tensor):
         flipped_input = torch.flip(input, dims=[0])
-        output_f, h_n_f = self.__forward_unidirectional(input, h_0)
-        output_b, h_n_b = self.__forward_unidirectional(flipped_input, h_0, layer_direction=1)
-        return torch.cat([output_f, output_b], dim=1), torch.cat([h_n_f, h_n_b], dim=1)
+        output_f, h_n_f = self.__forward_unidirectional(input, h_0[:self.num_layers, ])
+        output_b, h_n_b = self.__forward_unidirectional(flipped_input, h_0[self.num_layers:, ], ldir=1)
+        return torch.cat([output_f, output_b], dim=1), torch.cat([h_n_f, h_n_b], dim=0)
 
     def forward(self, input: torch.Tensor, h_0: Optional[torch.Tensor] = None):
 
         assert_shape(input, [None, self.input_size])
-        if not h_0:
+        if h_0 is None:
+            h_0 = self.__init_hidden()
+        else:
             assert_shape(h_0, [self.num_directions * self.num_layers, self.hidden_size])
 
         if not self.bidirectional:
@@ -169,5 +183,13 @@ class RNN(nn.Module):
 
 
 if __name__ == '__main__':
-    rnn = RNN(input_size=20, bidirectional=True, num_layers=2)
-    rnn(torch.ones((2, 20)))
+    inp1 = torch.ones((8, 20))
+    rnn = RNN(input_size=20, hidden_size=2, bidirectional=False, num_layers=1)
+    a, b = rnn(inp1)
+
+    inp2 = torch.ones((8, 1, 20))
+    trnn = nn.RNN(input_size=20, hidden_size=2, bidirectional=False, num_layers=1)
+    c, d = trnn(inp2)
+
+    print(a, b)
+    print(c, d)
