@@ -58,7 +58,7 @@ class RNNLayer(nn.Module):
 
     def forward(self, input: torch.Tensor, h_0: Optional[torch.Tensor] = None):
         if h_0 is None:
-            h_0 = nn.parameter.Parameter(torch.zeros((1, self.hidden_size)))
+            h_0 = nn.parameter.Parameter(torch.zeros((1, 1, self.hidden_size)))
         output = self.nonlinearity(self.i2h(input).add(self.h2h(h_0)))
         return output
 
@@ -87,7 +87,7 @@ class GRULayer(nn.Module):
 
     def forward(self, input: torch.Tensor, h_0: Optional[torch.Tensor] = None):
         if h_0 is None:
-            h_0 = nn.parameter.Parameter(torch.zeros((1, self.hidden_size)))
+            h_0 = nn.parameter.Parameter(torch.zeros((1, 1, self.hidden_size)))
 
         rt = self.gate_nonlinearity(self.r_i2h(input).add(self.r_h2h(h_0)))
         zt = self.gate_nonlinearity(self.z_i2h(input).add(self.z_h2h(h_0)))
@@ -123,9 +123,9 @@ class LSTMLayer(nn.Module):
 
     def forward(self, input: torch.Tensor, h_0: Optional[torch.Tensor] = None, c_0: Optional[torch.Tensor] = None):
         if h_0 is None:
-            h_0 = nn.parameter.Parameter(torch.zeros((1, self.hidden_size)))
+            h_0 = nn.parameter.Parameter(torch.zeros((1, 1, self.hidden_size)))
         if c_0 is None:
-            c_0 = nn.parameter.Parameter(torch.zeros((1, self.hidden_size)))
+            c_0 = nn.parameter.Parameter(torch.zeros((1, 1, self.hidden_size)))
 
         it = self.gate_nonlinearity(self.i_i2h(input).add(self.i_h2h(h_0)))
         ft = self.gate_nonlinearity(self.f_i2h(input).add(self.f_h2h(h_0)))
@@ -171,40 +171,40 @@ class RNN(nn.Module):
                             bias=self.bias)
 
     def init_hidden(self):
-        return torch.zeros((self.num_directions * self.num_layers, self.hidden_size))
+        return torch.zeros((1, self.num_directions * self.num_layers, self.hidden_size))
 
     def one_time_step(self, h_i, h_0, ldir):
         i = 0
         h_l = []
         for layer in self.layers:
-            h_i = layer[ldir](h_i, h_0[i:i + 1, ])
+            h_i = layer[ldir](h_i, h_0[:, i:i + 1, :])
             h_l.append(h_i)
             i += 1
-        return torch.cat(h_l, dim=0), h_l[-1]
+        return torch.cat(h_l, dim=1), h_l[-1]
 
     def forward_unidirectional(self, input: torch.Tensor, h_0: torch.Tensor, ldir: int = 0):
-        sequence_length = input.shape[0]
+        sequence_length = input.shape[1]
         h_n = []
         for step in range(sequence_length):
-            h_i = input[step:step + 1, ]
+            h_i = input[:, step:step + 1, :]
             h_0, h_t = self.one_time_step(h_i, h_0, ldir)
             h_n.append(h_t)
 
-        return torch.cat(h_n, dim=0), h_0
+        return torch.cat(h_n, dim=1), h_0
 
     def forward_bidirectional(self, input: torch.Tensor, h_0: torch.Tensor):
         flipped_input = torch.flip(input, dims=[0])
-        output_f, h_n_f = self.forward_unidirectional(input, h_0[:self.num_layers, ])
-        output_b, h_n_b = self.forward_unidirectional(flipped_input, h_0[self.num_layers:, ], ldir=1)
-        return torch.cat([output_f, output_b], dim=1), torch.cat([h_n_f, h_n_b], dim=0)
+        output_f, h_n_f = self.forward_unidirectional(input, h_0[:, :self.num_layers, :])
+        output_b, h_n_b = self.forward_unidirectional(flipped_input, h_0[:, self.num_layers:, :], ldir=1)
+        return torch.cat([output_f, output_b], dim=2), torch.swapdims(torch.cat([h_n_f, h_n_b], dim=1), 0, 1)
 
     def forward(self, input: torch.Tensor, h_0: Optional[torch.Tensor] = None):
 
-        assert_shape(input, [None, self.input_size])
+        assert_shape(input, [None, None, self.input_size])
         if h_0 is None:
             h_0 = self.init_hidden()
         else:
-            assert_shape(h_0, [self.num_directions * self.num_layers, self.hidden_size])
+            assert_shape(h_0, [None, self.num_directions * self.num_layers, self.hidden_size])
 
         if not self.bidirectional:
             output, h_n = self.forward_unidirectional(input, h_0)
@@ -253,39 +253,44 @@ class LSTM(RNN):
     def one_time_step(self, h_i, h_0, c_0, ldir):
         i = 0
         h_l = []
+        c_l = []
         for layer in self.layers:
-            h_i, c_i = layer[ldir](h_i, h_0[i:i + 1, ], c_0[i:i + 1, ])
+            h_i, c_i = layer[ldir](h_i, h_0[:, i:i + 1, :], c_0[:, i:i + 1, :])
             h_l.append(h_i)
+            c_l.append(c_i)
             i += 1
-        return torch.cat(h_l, dim=0), h_l[-1], c_i
+        return torch.cat(h_l, dim=1), h_l[-1], torch.cat(c_l, dim=1)
 
     def forward_unidirectional(self, input: torch.Tensor, h_0: torch.Tensor, c_0: torch.Tensor, ldir: int = 0):
-        sequence_length = input.shape[0]
+        sequence_length = input.shape[1]
         h_n = []
         for step in range(sequence_length):
-            h_i = input[step:step + 1, ]
-            h_0, h_t, c_t = self.one_time_step(h_i, h_0, c_0, ldir)
+            h_i = input[:, step:step + 1, :]
+            h_0, h_t, c_0 = self.one_time_step(h_i, h_0, c_0, ldir)
             h_n.append(h_t)
 
-        return torch.cat(h_n, dim=0), h_0, c_t
+        return torch.cat(h_n, dim=1), torch.swapdims(h_0, 0, 1), torch.swapdims(c_0, 0, 1)
 
     def forward_bidirectional(self, input: torch.Tensor, h_0: torch.Tensor, c_0: torch.Tensor):
-        flipped_input = torch.flip(input, dims=[0])
-        output_f, h_n_f, c_n_f = self.forward_unidirectional(input, h_0[:self.num_layers, ], c_0[:self.num_layers, ])
-        output_b, h_n_b, c_n_b = self.forward_unidirectional(flipped_input, h_0[self.num_layers:, ], c_0[self.num_layers:, ], ldir=1)
-        return torch.cat([output_f, output_b], dim=1), torch.cat([h_n_f, h_n_b], dim=0), torch.cat([c_n_f, c_n_b], dim=0)
+        flipped_input = torch.flip(input, dims=[1])
+        output_f, h_n_f, c_n_f = self.forward_unidirectional(input, h_0[:, :self.num_layers, :],
+                                                             c_0[:, :self.num_layers, :])
+        output_b, h_n_b, c_n_b = self.forward_unidirectional(flipped_input, h_0[:, self.num_layers:, :],
+                                                             c_0[:, self.num_layers:, :], ldir=1)
+        return torch.cat([output_f, output_b], dim=2), torch.cat([h_n_f, h_n_b], dim=0), \
+               torch.cat([c_n_f, c_n_b], dim=0)
 
     def forward(self, input: torch.Tensor, h_0: Optional[torch.Tensor] = None, c_0: Optional[torch.Tensor] = None):
 
-        assert_shape(input, [None, self.input_size])
+        assert_shape(input, [None, None, self.input_size])
         if h_0 is None:
             h_0 = self.init_hidden()
         else:
-            assert_shape(h_0, [self.num_directions * self.num_layers, self.hidden_size])
+            assert_shape(h_0, [None, self.num_directions * self.num_layers, self.hidden_size])
         if c_0 is None:
             c_0 = self.init_hidden()
         else:
-            assert_shape(c_0, [self.num_directions * self.num_layers, self.hidden_size])
+            assert_shape(c_0, [None, self.num_directions * self.num_layers, self.hidden_size])
 
         if not self.bidirectional:
             output, h_n, c_n = self.forward_unidirectional(input, h_0, c_0)
@@ -295,12 +300,12 @@ class LSTM(RNN):
 
 
 if __name__ == '__main__':
-    inp1 = torch.ones((2, 4))
-    rnn = GRU(input_size=4, hidden_size=4, bidirectional=True, num_layers=2)
+    inp1 = torch.ones((1, 6, 57))
+    rnn = LSTM(input_size=57, hidden_size=128, bidirectional=False, num_layers=2)
     a, b = rnn(inp1)
 
-    inp2 = torch.ones((2, 1, 4))
-    trnn = nn.GRU(input_size=4, hidden_size=4, bidirectional=True, num_layers=2)
+    inp2 = torch.ones((1, 6, 57))
+    trnn = nn.LSTM(input_size=57, hidden_size=128, bidirectional=False, num_layers=2, batch_first=True)
     c, d = trnn(inp2)
 
     print(a, b)
